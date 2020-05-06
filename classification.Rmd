@@ -9,6 +9,7 @@ library(lubridate)
 library(caret)
 library(rpart)
 library(ROCR)
+library(broom)
 theme_set(theme_bw())
 
 csv_file <- "Affordability_Wide_2017Q4_Public.csv"
@@ -63,16 +64,26 @@ so we'll spread the affordability data over the time periods.
 total_df <- predictor_df %>% 
   inner_join(y=outcome_df) %>% 
   spread(time, affordability) %>% 
-  select(-RegionName) 
+  select(-RegionName)
 total_df
 
+
+for(i in 3:ncol(total_df)) {
+  col_mean <- sapply(total_df[,i], mean)
+  col_sd <- sapply(total_df[,i], sd)
+  for(k in 1:nrow(total_df)) {
+    total_df[k, i] <- (total_df[k, i] - col_mean) / col_sd
+  }
+}
+
+total_df
 
 ```
 
 
 Now we divide our set into our training set and our testing set
 
-```{r models, message=FALSE}
+```{r models}
 set.seed(1234)
 
 partitionRule <- createFolds(total_df$Direction, k=10, list=F)
@@ -86,50 +97,43 @@ splitRule <- trainControl(method='cv',
                           number=10,
                           classProbs=TRUE,
                           summaryFunction=twoClassSummary)
-
-cforestModel <- train(Direction~.,
-                  data=trainingSet,
-                  trControl=splitRule,
-                  method='cforest',
-                  preProc = c("center", "scale"),
-                  metric='ROC')
-
-treeModel <- train(Direction~., 
-                  data=trainingSet,
-                  trControl=splitRule,
-                  method='rpart',
-                  preProc = c("center", "scale"),
-                  metric='ROC')
 ```
 
 
 
-testing the accuracy of our models
+Testing the accuracy of our models. I use the predict function instead of the train function because
+the train function keeps causing problems when run with prediction.
 
 # Decision Tree
 ```{r tree}
 tree <- rpart(Direction~., data=trainingSet)
 treePred <- predict(tree, newdata=testingSet, type='vector')
-
 tp <- prediction(treePred, testingSet$Direction)
+
+treePred[treePred == 1] <- 'down'
+treePred[treePred == 2] <- 'up'
+
+confusionMatrix(factor(treePred), factor(testingSet$Direction))
 ```
 
 # Random Forests
 ```{r forests}
 library(randomForest)
-forestPred <- predict(cforestModel, newdata=testingSet, type='raw')
-length(forestPred)
-length(testingSet)
-prediction(forestPred, testingSet$Direction)
-length(forestPred)
-forestTab
+forest <- randomForest(ifelse(Direction == 'up', 1, 0)~.,data=trainingSet, type='raw')
+forestPred <- predict(forest, newdata=testingSet, type='response')
+fp <- prediction(forestPred, testingSet$Direction)
+
+forestPred[forestPred >= 0.5] <- 'up'
+forestPred[forestPred < 0.5] <- 'down'
+
+confusionMatrix(factor(forestPred), factor(testingSet$Direction))
 ```
 
 ```{r ROC}
 
 # a function to obtain performance data
 # (tpr and fpr) over the given cross validation
-get_roc_data <- function(df, ntree, cv_partition, type, fit_control) {
+get_roc_data_tree <- function(df, ntree, cv_partition, type, fit_control) {
   mean_fpr <- seq(0, 1, len=100)
   aucs <- numeric(length(cv_partition))
   
@@ -138,7 +142,6 @@ get_roc_data <- function(df, ntree, cv_partition, type, fit_control) {
     
     preds <- predict(fit, newdata=testingSet,type="vector")
     
-
     perf <- ROCR::prediction(preds, testingSet$Direction) %>%
       ROCR::performance(measure="tpr", x.measure="fpr")
 
@@ -157,6 +160,40 @@ get_roc_data <- function(df, ntree, cv_partition, type, fit_control) {
   do.call(rbind, res)
 }
 
+get_roc_data_forest <- function(df, ntree, cv_partition, type, fit_control) {
+  mean_fpr <- seq(0, 1, len=100)
+  aucs <- numeric(length(cv_partition))
+  test <- testingSet 
+  test$Direction[test$Direction == 'up'] <- 1
+  test$Direction[test$Direction == 'down'] <- 0
+  
+  res <- lapply(seq_along(cv_partition),  function(i) {
+    fit <- randomForest(ifelse(Direction == 'up', 1, 0)~.,
+                        data=trainingSet, type='raw')
+    
+    preds <- predict(fit, newdata=testingSet,type="response")
+    preds[preds >= 0.5] <- 1
+    preds[forestPred < 0.5] <- 0
+    
+    perf <- ROCR::prediction(preds, test$Direction) %>%
+      ROCR::performance(measure="tpr", x.measure="fpr")
+
+    fpr <- unlist(perf@x.values)
+    tpr <- unlist(perf@y.values)
+    
+
+    interp_tpr <- approxfun(fpr, tpr)(mean_fpr)
+    interp_tpr[1] <- 0.0
+  
+    
+    data_frame(fold=rep(i, length(mean_fpr)), fpr=mean_fpr, tpr=interp_tpr)
+  })
+  
+
+  do.call(rbind, res)
+}
+
+
 compute_auc <- function(curve_df) {
   curve_df %>% 
     group_by(fold) %>%
@@ -165,61 +202,44 @@ compute_auc <- function(curve_df) {
 
 ```
 
-Get the performance data for 10 trees.
+Get the performance data for 500 trees.
 
 ```{r trees}
 
-small_curve_df <- get_roc_data(df=total_df, ntree = 10, 
-                               cv_partition=partitionRule, type="rpart", fit_control=splitRule)
-small_auc_df <- compute_auc(small_curve_df)
+curve_tree <- get_roc_data_tree(df=total_df, ntree=500, cv_partition=partitionRule,
+                                      type='rpart', fit_control=splitRule) %>% 
+  mutate(model="tree")
+auc_tree <- compute_auc(curve_tree) %>% 
+  mutate(model="tree")
 
-large_curve_df <- get_roc_data(df=total_df, ntree=500, cv_partition=partitionRule, type='rpart',
-                               fit_control=splitRule)
-large_auc_df <- compute_auc(large_curve_df)
+
+curve_forest <- get_roc_data_forest(df=total_df, ntree=500, cv_partition=partitionRule, 
+                                    type='forest', fit_control=splitRule) %>% 
+  mutate(model="forest")
+auc_forest <- compute_auc(curve_forest) %>% 
+  mutate(model="forest")
 ```
 
-```{r graph}
-curve_df <- small_curve_df %>%
-  mutate(model="small") %>%
-  rbind(mutate(large_curve_df, model="large")) %>%
-  mutate(model = factor(model, levels=c("small", "large")))
-
-auc_df <- small_auc_df %>%
-  mutate(model="small") %>%
-  rbind(mutate(large_auc_df, model="large")) %>%
-  mutate(model = factor(model, levels=c("small", "large")))
-
-curve_df <- small_curve_df %>%
-  mutate(model="small") %>%
-  rbind(mutate(large_curve_df, model="large")) %>%
-  mutate(model = factor(model, levels=c("small", "large")))
-
-auc_df <- small_auc_df %>%
-  mutate(model="small") %>%
-  rbind(mutate(large_auc_df, model="large")) %>%
-  mutate(model = factor(model, levels=c("small", "large")))
-
+```{r tree}
 # plot distribution of 
-ggplot(auc_df, aes(x=model, y=auc)) +
+ggplot(auc_tree, aes(x=model, y=auc)) +
   geom_jitter(position=position_jitter(0.1)) +
   coord_flip() + 
-  labs(title="AUC comparision",
+  labs(title="AUC comparision Tree",
+       x="Model",
+       y="Area under ROC curve")
+ggplot(auc_forest, aes(x=model, y=auc)) +
+  geom_jitter(position=position_jitter(0.1)) +
+  coord_flip() + 
+  labs(title="AUC comparision Forest",
        x="Model",
        y="Area under ROC curve")
 ```
 
 
-```{r test_for_diff}
-library(broom)
+```{r test_for_diff_tree}
 
-model_tab <- auc_df %>%
-  lm(auc~model,data=.) %>%
-  tidy() 
-
-model_tab %>%
-  knitr::kable()
-
-curve_df %>%
+tree_ROC_plot <- curve_tree  %>%
   group_by(model, fpr) %>%
   summarize(tpr = mean(tpr)) %>%
   ggplot(aes(x=fpr, y=tpr, color=model)) +
@@ -228,64 +248,7 @@ curve_df %>%
          x = "False positive rate",
          y = "True positive rate")
 
->>>>>>> aae2e1b5d92f738e764fd4b91019e0e6f377cfda
-```
-
-Get the performance data for 10 trees.
-
-```{r trees}
-
-small_curve_df <- get_roc_data(df=total_df, ntree = 10, 
-                               cv_partition=partitionRule, type="rpart", fit_control=splitRule)
-small_auc_df <- compute_auc(small_curve_df)
-
-large_curve_df <- get_roc_data(df=total_df, ntree=500, cv_partition=partitionRule, type='rpart',
-                               fit_control=splitRule)
-large_auc_df <- compute_auc(large_curve_df)
-```
-
-```{r graph}
-curve_df <- small_curve_df %>%
-  mutate(model="small") %>%
-  rbind(mutate(large_curve_df, model="large")) %>%
-  mutate(model = factor(model, levels=c("small", "large")))
-
-auc_df <- small_auc_df %>%
-  mutate(model="small") %>%
-  rbind(mutate(large_auc_df, model="large")) %>%
-  mutate(model = factor(model, levels=c("small", "large")))
-
-curve_df <- small_curve_df %>%
-  mutate(model="small") %>%
-  rbind(mutate(large_curve_df, model="large")) %>%
-  mutate(model = factor(model, levels=c("small", "large")))
-
-auc_df <- small_auc_df %>%
-  mutate(model="small") %>%
-  rbind(mutate(large_auc_df, model="large")) %>%
-  mutate(model = factor(model, levels=c("small", "large")))
-
-# plot distribution of 
-ggplot(auc_df, aes(x=model, y=auc)) +
-  geom_jitter(position=position_jitter(0.1)) +
-  coord_flip() + 
-  labs(title="AUC comparision",
-       x="Model",
-       y="Area under ROC curve")
-```
-
-
-```{r test_for_diff}
-library(broom)
-
-model_tab <- auc_df %>%
-  lm(auc~model,data=.) %>%
-  tidy() 
-
-model_tab %>%
-  knitr::kable()
-
-curve_df %>%
+forest_ROC_plot <- curve_forest%>%
   group_by(model, fpr) %>%
   summarize(tpr = mean(tpr)) %>%
   ggplot(aes(x=fpr, y=tpr, color=model)) +
@@ -294,4 +257,11 @@ curve_df %>%
          x = "False positive rate",
          y = "True positive rate")
 
+ggarrange(tree_ROC_plot, forest_ROC_plot)
+``` 
+
+```{r test_for_diff_forest}
+
+
 ```
+
