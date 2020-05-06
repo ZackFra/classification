@@ -117,12 +117,10 @@ tp <- prediction(treePred, testingSet$Direction)
 # Random Forests
 ```{r forests}
 library(randomForest)
-forestPred <- predict(cforestModel, newdata=testingSet, type='raw')
-length(forestPred)
-length(testingSet)
+
+forest <- randomForest(Direction~., data=trainingSet)
+forestPred <- predict(forest, newdata=testingSet, type='vector')
 prediction(forestPred, testingSet$Direction)
-length(forestPred)
-forestTab
 ```
 
 ```{r ROC}
@@ -162,7 +160,6 @@ compute_auc <- function(curve_df) {
     group_by(fold) %>%
     summarize(auc=pracma::trapz(fpr, tpr))
 }
-
 ```
 
 Get the performance data for 10 trees.
