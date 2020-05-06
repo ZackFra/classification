@@ -1,9 +1,10 @@
 ---
 title: "Classification"
 output: pdf_document
+author: "Zackary Frazier"
 ---
 
-```{r setup}
+```{r setup, message=FALSE}
 library(tidyverse)
 library(lubridate)
 library(caret)
@@ -65,9 +66,8 @@ total_df <- predictor_df %>%
   inner_join(y=outcome_df) %>% 
   spread(time, affordability) %>% 
   select(-RegionName)
-total_df
 
-
+# standardize the data
 for(i in 3:ncol(total_df)) {
   col_mean <- sapply(total_df[,i], mean)
   col_sd <- sapply(total_df[,i], sd)
@@ -76,12 +76,12 @@ for(i in 3:ncol(total_df)) {
   }
 }
 
-total_df
+head(total_df)
 
 ```
 
 
-Now we divide our set into our training set and our testing set
+Now we create the 10-folds and create the training set and the testing set.
 
 ```{r models}
 set.seed(1234)
@@ -101,11 +101,12 @@ splitRule <- trainControl(method='cv',
 
 
 
-Testing the accuracy of our models. I use the predict function instead of the train function because
-the train function keeps causing problems when run with prediction.
+Here I test the accuracy of our models using predictions and express the results as a confusion matrix. 
+I use the predict function instead of the train function because the train function keeps causing problems 
+when I run the prediction function.
 
 # Decision Tree
-```{r tree}
+```{r dec_tree}
 tree <- rpart(Direction~., data=trainingSet)
 treePred <- predict(tree, newdata=testingSet, type='vector')
 tp <- prediction(treePred, testingSet$Direction)
@@ -116,8 +117,11 @@ treePred[treePred == 2] <- 'up'
 confusionMatrix(factor(treePred), factor(testingSet$Direction))
 ```
 
+Here I rest the predictions made by a random forest. Interestingly, it's predictions are less accurate than
+the decision tree. This may imply that the vastness of the amounts of data are skewing the overall effeciveness.
+
 # Random Forests
-```{r forests}
+```{r forests, warning=F}
 library(randomForest)
 forest <- randomForest(ifelse(Direction == 'up', 1, 0)~.,data=trainingSet, type='raw')
 forestPred <- predict(forest, newdata=testingSet, type='response')
@@ -128,6 +132,8 @@ forestPred[forestPred < 0.5] <- 'down'
 
 confusionMatrix(factor(forestPred), factor(testingSet$Direction))
 ```
+
+Here I generate three functions for getting ROC data each taylored to the different models.
 
 ```{r ROC}
 
@@ -202,9 +208,10 @@ compute_auc <- function(curve_df) {
 
 ```
 
-Get the performance data for 500 trees.
+Here I get the performance data for 500 trees and 500 random forests. This allows me to retrieve a sufficiently
+large enough amount of data for ROC and AUROC analysis.
 
-```{r trees}
+```{r trees, warning=F}
 
 curve_tree <- get_roc_data_tree(df=total_df, ntree=500, cv_partition=partitionRule,
                                       type='rpart', fit_control=splitRule) %>% 
@@ -213,15 +220,21 @@ auc_tree <- compute_auc(curve_tree) %>%
   mutate(model="tree")
 
 
-curve_forest <- get_roc_data_forest(df=total_df, ntree=500, cv_partition=partitionRule, 
-                                    type='forest', fit_control=splitRule) %>% 
+curve_forest <- get_roc_data_forest(df=total_df, ntree=500,
+                        cv_partition=partitionRule, 
+                        type='forest', fit_control=splitRule) %>% 
   mutate(model="forest")
 auc_forest <- compute_auc(curve_forest) %>% 
   mutate(model="forest")
 ```
 
-```{r tree}
-# plot distribution of 
+Here I compare the AUC of each the tree model and the forest model. These analyses are expressed as two 
+different graphs because the combination of the data into one graph causes the forest data to appear as a
+small dot, and that's not very helpful for analysis. It appears the tree model has significantly more variance
+as the threshold changes while the forest model's AUC consistently has a value of 0.6.
+
+```{r auc}
+
 ggplot(auc_tree, aes(x=model, y=auc)) +
   geom_jitter(position=position_jitter(0.1)) +
   coord_flip() + 
@@ -236,32 +249,41 @@ ggplot(auc_forest, aes(x=model, y=auc)) +
        y="Area under ROC curve")
 ```
 
+Now we use linear regression to analyze the differences between the models. The estimate being positive
+shows that the tree model is slightly better at predicting the the results. The small p.value indicates
+that we can ignore the null hypothesis that both models are equivalent in terms of measuring the data.
+``` {r values}
+library(broom)
 
-```{r test_for_diff_tree}
-
-tree_ROC_plot <- curve_tree  %>%
-  group_by(model, fpr) %>%
-  summarize(tpr = mean(tpr)) %>%
-  ggplot(aes(x=fpr, y=tpr, color=model)) +
-    geom_line() +
-    labs(title = "ROC curves",
-         x = "False positive rate",
-         y = "True positive rate")
-
-forest_ROC_plot <- curve_forest%>%
-  group_by(model, fpr) %>%
-  summarize(tpr = mean(tpr)) %>%
-  ggplot(aes(x=fpr, y=tpr, color=model)) +
-    geom_line() +
-    labs(title = "ROC curves",
-         x = "False positive rate",
-         y = "True positive rate")
-
-ggarrange(tree_ROC_plot, forest_ROC_plot)
-``` 
-
-```{r test_for_diff_forest}
-
+lm(auc~model, data=rbind(auc_forest, auc_tree)) %>%
+  tidy() 
 
 ```
+
+Here we can see a side-by-side comparison of the ROC curves of the tree model and the random forest model.
+Clearly we can see from a visual analysis that the area under the tree's curve is greater than the area 
+under the random forest's curve.
+
+```{r test_for_diff}
+
+curve_tree  %>%
+  group_by(model, fpr) %>%
+  summarize(tpr = mean(tpr)) %>%
+  ggplot(aes(x=fpr, y=tpr, color=model)) +
+    geom_line() +
+    labs(title = "Tree ROC curve",
+         x = "False positive rate",
+         y = "True positive rate")
+
+curve_forest%>%
+  group_by(model, fpr) %>%
+  summarize(tpr = mean(tpr)) %>%
+  ggplot(aes(x=fpr, y=tpr, color=model)) +
+    geom_line() +
+    labs(title = "Random Forest ROC curve",
+         x = "False positive rate",
+         y = "True positive rate")
+
+``` 
+
 
