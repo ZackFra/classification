@@ -287,3 +287,5 @@ curve_forest%>%
 ``` 
 
 
+In conclusion, given this experiment, the tree method is more accurate than the random forest method for
+predicting affordability trends.
